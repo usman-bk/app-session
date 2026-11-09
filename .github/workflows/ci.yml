@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_session_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # ci rather than install, so the lockfile is what is tested and a
+      # dependency cannot drift between a developer's machine and here.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Without a database first. The token handling and the service logic
+      # have to be testable without one, and a skip that becomes permanent
+      # is how that stops being true.
+      - name: Test with nothing external
+        run: npm test
+
+      - name: Test against Postgres
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_session_test
+        run: npm test
+
+      # The rotation guard is the security property here, so check the
+      # test that covers it can actually fail.
+      - name: The rotation test can fail
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_session_test
+        run: |
+          cp src/store/postgres.ts /tmp/postgres.ts.bak
+          sed -i 's/AND token_hash = \$2 AND revoked_at IS NULL/AND revoked_at IS NULL/' src/store/postgres.ts
+          if npm test; then
+            echo "the suite passed with the rotation guard removed, so it checks nothing"
+            cp /tmp/postgres.ts.bak src/store/postgres.ts
+            exit 1
+          fi
+          cp /tmp/postgres.ts.bak src/store/postgres.ts
